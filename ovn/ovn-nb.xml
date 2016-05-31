@@ -119,6 +119,18 @@
       Access control rules that apply to packets within the logical switch.
     </column>
 
+    <group title="other_config">
+      <p>
+        Additional configuration options for the logical switch.
+      </p>
+
+      <column name="other_config" key="subnet">
+        If set, logical ports that are attached to this switch that do not have
+        a MAC/IPv4 address will automatically be allocated a globally unique
+        MAC address/unused IPv4 address within the provided subnet.
+      </column>
+    </group>
+
     <group title="Common Columns">
       <column name="external_ids">
         See <em>External IDs</em> at the beginning of this document.
@@ -422,7 +434,24 @@
             ports) whose <ref column="addresses"/> columns include
             <code>unknown</code>.
           </dd>
+
+          <dt><code>dynamic</code></dt>
+          <dd>
+            This indicates that the logical port should be automatically
+            assigned a globally unique MAC address and an unused IPv4 address
+            within the subnet that this logical port belongs to.  The assigned
+            addresses will populate the <ref column="dynamic_addresses"/>
+            column.  For this keyword to work properly, the other_config:subnet
+            of the logical switch that this logical port is attached to must be
+            set.
+          </dd>
         </dl>
+      </column>
+
+      <column name="dynamic_addresses">
+        <p>
+          Addresses assigned to the logical port by the IPAM.
+        </p>
       </column>
 
       <column name="port_security">

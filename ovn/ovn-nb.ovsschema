@@ -1,6 +1,6 @@
 {
     "name": "OVN_Northbound",
-    "version": "5.2.0",
+    "version": "5.3.0",
     "cksum": "650844440 8727",
     "tables": {
         "NB_Global": {
@@ -31,6 +31,9 @@
                                                   "refType": "strong"},
                                            "min": 0,
                                            "max": 1}},
+                "other_config": {
+                    "type": {"key": "string", "value": "string",
+                             "min": 0, "max": "unlimited"}},
                 "external_ids": {
                     "type": {"key": "string", "value": "string",
                              "min": 0, "max": "unlimited"}}},
@@ -51,6 +54,9 @@
                                       "maxInteger": 4095},
                               "min": 0, "max": 1}},
                 "addresses": {"type": {"key": "string",
+                                       "min": 0,
+                                       "max": "unlimited"}},
+                "dynamic_addresses": {"type": {"key": "string",
                                        "min": 0,
                                        "max": "unlimited"}},
                 "port_security": {"type": {"key": "string",

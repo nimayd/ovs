@@ -58,6 +58,16 @@ static const char *ovnsb_db;
 
 static const char *default_nb_db(void);
 static const char *default_sb_db(void);
+
+#define MAC_ADDR_PREFIX 0x0A0000000000ULL
+#define MAC_ADDR_SPACE 0xfffffe
+
+/* Stores the suffix of the most recently ipam-allocated MAC address. */
+static uint32_t last_mac;
+
+/* MAC address table of "struct eth_addr"s, that holds the MAC addresses
+ * allocated by the ipam. */
+static struct hmap macam = HMAP_INITIALIZER(&macam);
 
 /* Pipeline stages. */
 
@@ -288,7 +298,39 @@ struct ovn_datapath {
     uint32_t port_key_hint;
 
     bool has_unknown;
+
+    /* IPAM data. */
+    struct hmap ipam;
 };
+
+struct macam_node {
+    struct hmap_node hmap_node;
+    struct eth_addr mac_addr; /* Allocated MAC address. */
+};
+
+static void
+cleanup_macam(struct hmap *macam)
+{
+    struct macam_node *node;
+    HMAP_FOR_EACH_POP (node, hmap_node, macam) {
+        free(node);
+    }
+}
+
+struct ipam_node {
+    struct hmap_node hmap_node;
+    uint32_t ip_addr; /* Allocated IP address. */
+};
+
+static void
+destroy_ipam(struct hmap *ipam)
+{
+    struct ipam_node *node;
+    HMAP_FOR_EACH_POP (node, hmap_node, ipam) {
+        free(node);
+    }
+    hmap_destroy(ipam);
+}
 
 static struct ovn_datapath *
 ovn_datapath_create(struct hmap *datapaths, const struct uuid *key,
@@ -302,6 +344,7 @@ ovn_datapath_create(struct hmap *datapaths, const struct uuid *key,
     od->nbs = nbs;
     od->nbr = nbr;
     hmap_init(&od->port_tnlids);
+    hmap_init(&od->ipam);
     od->port_key_hint = 0;
     hmap_insert(datapaths, &od->key_node, uuid_hash(&od->key));
     return od;
@@ -316,6 +359,7 @@ ovn_datapath_destroy(struct hmap *datapaths, struct ovn_datapath *od)
          * use it. */
         hmap_remove(datapaths, &od->key_node);
         destroy_tnlids(&od->port_tnlids);
+        destroy_ipam(&od->ipam);
         free(od->router_ports);
         free(od);
     }
@@ -600,6 +644,294 @@ ovn_port_allocate_key(struct ovn_datapath *od)
                           (1u << 15) - 1, &od->port_key_hint);
 }
 
+static bool
+ipam_is_duplicate_mac(struct eth_addr *ea, uint64_t mac64)
+{
+    struct macam_node *macam_node;
+    HMAP_FOR_EACH_WITH_HASH (macam_node, hmap_node, hash_uint64(mac64),
+                            &macam) {
+        if (eth_addr_equals(*ea, macam_node->mac_addr)) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+            VLOG_WARN_RL(&rl, "Duplicate MAC set: "ETH_ADDR_FMT,
+                         ETH_ADDR_ARGS(macam_node->mac_addr));
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool
+ipam_is_duplicate_ip(struct ovn_datapath *od, uint32_t ip)
+{
+    struct ipam_node *ipam_node;
+    HMAP_FOR_EACH_WITH_HASH (ipam_node, hmap_node, hash_int(ip, 0),
+                             &od->ipam) {
+        if (ipam_node->ip_addr == ip) {
+            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+            VLOG_WARN_RL(&rl, "Duplicate IP set: "IP_FMT,
+                         IP_ARGS(htonl(ip)));
+            return true;
+        }
+    }
+    return false;
+}
+
+static void
+ipam_insert_mac(struct eth_addr *ea, bool check)
+{
+    if (!ea) {
+        return;
+    }
+
+    uint64_t mac64 = eth_addr_to_uint64(*ea);
+    if (check && ipam_is_duplicate_mac(ea, mac64)) {
+        return;
+    }
+
+    /* Insert new MAC into MACAM if it is not a duplicate and was
+     * assigned by this address management system. */
+    if (!((mac64 ^ MAC_ADDR_PREFIX) >> 24)) {
+        struct macam_node *new_macam_node = xmalloc(sizeof *new_macam_node);
+        new_macam_node->mac_addr = *ea;
+        hmap_insert(&macam, &new_macam_node->hmap_node, hash_uint64(mac64));
+    }
+}
+
+static void
+ipam_insert_ip(struct ovn_datapath *od, uint32_t ip, bool check)
+{
+    if (!od) {
+        return;
+    }
+
+    if (check && ipam_is_duplicate_ip(od, ip)) {
+        return;
+    }
+
+    struct ipam_node *new_ipam_node = xmalloc(sizeof *new_ipam_node);
+    new_ipam_node->ip_addr = ip;
+    hmap_insert(&od->ipam, &new_ipam_node->hmap_node, hash_int(ip, 0));
+}
+
+static void
+ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
+{
+    if (!od || !op) {
+        return;
+    }
+
+    if (op->nbs) {
+        /* Add all the port's addresses to address data structures. */
+        for (size_t i = 0; i < op->nbs->n_addresses; i++) {
+            struct lport_addresses laddrs;
+            if (!extract_lsp_addresses(op->nbs->addresses[i], &laddrs)) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl, "Extract addresses failed.");
+                continue;
+            }
+            ipam_insert_mac(&laddrs.ea, true);
+
+            /* IP is only added to IPAM if the switch's subnet option
+             * is set, whereas MAC is always added to MACAM. */
+            if (!smap_get(&od->nbs->other_config, "subnet")) {
+                continue;
+            }
+
+            for (size_t j = 0; j < laddrs.n_ipv4_addrs; j++) {
+                uint32_t ip = ntohl(laddrs.ipv4_addrs[j].addr);
+                ipam_insert_ip(od, ip, true);
+            }
+        }
+    } else if (op->nbr) {
+        struct lport_addresses lrp_networks;
+        if (!extract_lrp_networks(op->nbr, &lrp_networks)) {
+            static struct vlog_rate_limit rl
+                = VLOG_RATE_LIMIT_INIT(1, 1);
+            VLOG_WARN_RL(&rl, "Extract addresses failed.");
+            return;
+        }
+        ipam_insert_mac(&lrp_networks.ea, true);
+
+        /* XXX This should be check the logical switch's subnet,
+         * not the logical switch port's. */
+        if (!op->peer || !op->peer->nbs
+            || !smap_get(&op->peer->nbs->options, "subnet")) {
+            return;
+        }
+
+        for (size_t j = 0; j < lrp_networks.n_ipv4_addrs; j++) {
+            uint32_t ip = ntohl(lrp_networks.ipv4_addrs[j].addr);
+            ipam_insert_ip(od, ip, true);
+        }
+    }
+}
+
+static uint64_t
+ipam_get_unused_mac(void)
+{
+    uint64_t mac64;
+    uint32_t mac_addr_suffix;
+    struct eth_addr mac;
+    for (uint32_t i = 0; i < MAC_ADDR_SPACE; i++) {
+        /* The tentative MAC's suffix will be in the interval [1, 0xffffff). */
+        mac_addr_suffix = ((last_mac + i) % MAC_ADDR_SPACE) + 1;
+        mac64 = MAC_ADDR_PREFIX | mac_addr_suffix;
+        eth_addr_from_uint64(mac64, &mac);
+        if (!ipam_is_duplicate_mac(&mac, mac64)) {
+            last_mac = mac_addr_suffix;
+            break;
+        }
+    }
+
+    if (mac64 == MAC_ADDR_SPACE) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_WARN_RL(&rl, "MAC address space exhausted.");
+        mac64 = 0;
+    }
+
+    return mac64;
+}
+
+static uint32_t
+ipam_get_unused_ip(struct ovn_datapath *od, uint32_t subnet, uint32_t mask)
+{
+    if (!od) {
+        return 0;
+    }
+
+    uint32_t ip = 0;
+
+    /* Find first unused IP address in subnet. x.x.x.1 is reserved for
+     * a logical router port. */
+    for (uint32_t i = 2; i < ~mask; i++) {
+        uint32_t tentative_ip = subnet + i;
+        if (!ipam_is_duplicate_ip(od, tentative_ip)) {
+            ip = tentative_ip;
+            break;
+        }
+    }
+
+    if (!ip) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
+        VLOG_WARN_RL( &rl, "Subnet address space has been exhausted.");
+    }
+
+    return ip;
+}
+
+static void
+ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
+                   ovs_be32 subnet, ovs_be32 mask)
+{
+    if (!od || !op || !op->nbs) {
+        return;
+    }
+
+    /* Allocate MAC address. */
+    struct eth_addr mac;
+    if (!op->nbs->n_addresses) {
+        uint64_t mac64 = ipam_get_unused_mac();
+        eth_addr_from_uint64(mac64, &mac);
+    } else {
+        /* If op already has at least one IPv4 address, do not allocate any
+         * addresses for it. Otherwise, use one of op's MAC addresses that
+         * does not have an IPv4 address associated with it to construct a new
+         * address. */
+        struct lport_addresses laddrs;
+        for (size_t i = 0; i < op->nbs->n_addresses; i++) {
+            if (!extract_lsp_addresses(op->nbs->addresses[i], &laddrs)) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_INFO_RL(&rl, "invalid syntax '%s' in addresses. No MAC"
+                          " address found", op->nbs->addresses[i]);
+                return;
+            } else if (laddrs.n_ipv4_addrs > 0) {
+                return;
+            } else {
+                mac = laddrs.ea;
+            }
+        }
+    }
+
+    /* Allocate ip and add it to IPAM hmap. */
+    uint32_t ip = ipam_get_unused_ip(od, ntohl(subnet), ntohl(mask));
+    if (!ip) {
+        return;
+    }
+    ipam_insert_ip(od, ip, false);
+
+    /* Add MAC to MACAM hmap if it is newly allocated and an IPv4 address was
+     * successfully allocated. */
+    if (!op->nbs->n_addresses) {
+        ipam_insert_mac(&mac, false);
+    }
+
+    /* Convert MAC to string form. */
+    struct ds mac_ds;
+    ds_init(&mac_ds);
+    ds_put_format(&mac_ds, ETH_ADDR_FMT, ETH_ADDR_ARGS(mac));
+
+    /* Convert IP to string form. */
+    struct ds ip_ds;
+    ds_init(&ip_ds);
+    ds_put_format(&ip_ds, IP_FMT, IP_ARGS(htonl(ip)));
+
+    char *new_addr = xasprintf("%s %s", mac_ds.string, ip_ds.string);
+    nbrec_logical_switch_port_set_addresses(op->nbs, (const char **) &new_addr,
+                                            1);
+    ds_destroy(&mac_ds);
+    ds_destroy(&ip_ds);
+}
+
+static void
+build_ipam(struct northd_context *ctx, struct hmap *datapaths,
+           struct hmap *ports)
+{
+    if (!ctx->ovnnb_txn) {
+        return;
+    }
+
+    /* If the switch's other_config:subnet is set, allocate new addresses for
+     * ports that do not have any. */
+    struct ovn_datapath *od;
+    HMAP_FOR_EACH (od, key_node, datapaths) {
+        if (od->nbs) {
+            const char *subnet_str = smap_get(&od->nbs->other_config,
+                                              "subnet");
+            if (!subnet_str) {
+                continue;
+            }
+
+            ovs_be32 subnet, mask;
+            char *error = ip_parse_masked(subnet_str, &subnet, &mask);
+            if (error || mask == OVS_BE32_MAX || !ip_is_cidr(mask)) {
+                static struct vlog_rate_limit rl
+                    = VLOG_RATE_LIMIT_INIT(5, 1);
+                VLOG_WARN_RL(&rl, "bad 'subnet' %s", subnet_str);
+                free(error);
+                continue;
+            }
+
+            struct ovn_port *op;
+            for (size_t i = 0; i < od->nbs->n_ports; i++) {
+                const struct nbrec_logical_switch_port *nbs =
+                    od->nbs->ports[i];
+
+                if (!nbs) {
+                    continue;
+                }
+
+                op = ovn_port_find(ports, nbs->name);
+                if (op && !(op->nbs && op->peer)) {
+                    /* Allocate addresses for logical switch ports that do not
+                     * have a peer. */
+                    ipam_allocate_addresses(od, op, subnet, mask);
+                }
+            }
+        }
+    }
+}
+
+
 static void
 join_logical_ports(struct northd_context *ctx,
                    struct hmap *datapaths, struct hmap *ports,
@@ -680,6 +1012,7 @@ join_logical_ports(struct northd_context *ctx,
                 }
 
                 op->od = od;
+                ipam_add_port_addresses(od, op);
             }
         } else {
             for (size_t i = 0; i < od->nbr->n_ports; i++) {
@@ -747,6 +1080,7 @@ join_logical_ports(struct northd_context *ctx,
                 op->od->router_ports,
                 sizeof *op->od->router_ports * (op->od->n_router_ports + 1));
             op->od->router_ports[op->od->n_router_ports++] = op;
+            ipam_add_port_addresses(op->od, peer);
         } else if (op->nbrp && op->nbrp->peer) {
             struct ovn_port *peer = ovn_port_find(ports, op->nbrp->peer);
             if (peer) {
@@ -3180,6 +3514,7 @@ ovnnb_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop)
     build_datapaths(ctx, &datapaths);
     build_ports(ctx, &datapaths, &ports);
     build_lflows(ctx, &datapaths, &ports);
+    build_ipam(ctx, &datapaths, &ports);
 
     sync_address_sets(ctx);
 
@@ -3204,6 +3539,8 @@ ovnnb_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop)
         sbrec_sb_global_set_nb_cfg(sb, nb->nb_cfg);
         sb_loop->next_cfg = nb->nb_cfg;
     }
+
+    cleanup_macam(&macam);
 }
 
 /* Handle changes to the 'chassis' column of the 'Port_Binding' table.  When

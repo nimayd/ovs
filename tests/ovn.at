@@ -3716,3 +3716,155 @@ AT_CHECK([ovs-appctl -t ovn-controller version], [0], [ignore])
 OVN_CLEANUP([hv1])
 
 AT_CLEANUP
+
+AT_SETUP([ovn -- ipam])
+AT_KEYWORDS([ovnipam])
+AT_SKIP_IF([test $HAVE_PYTHON = no])
+ovn_start
+
+# Add a port to a switch that does not have a subnet set, then set the
+# subnet which should result in an address being allocated for the port.
+ovn-nbctl ls-add sw0
+ovn-nbctl lsp-add sw0 p0
+ovn-nbctl add Logical-Switch sw0 other_config subnet=192.168.1.0/24
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p0 addresses], [0],
+    [[["0a:00:00:00:00:01 192.168.1.2"]]
+])
+
+# Add 9 more ports to sw0, addresses should all be unique.
+for n in `seq 1 9`; do
+    ovn-nbctl lsp-add sw0 "p$n"
+done
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p1 addresses], [0],
+    [[["0a:00:00:00:00:02 192.168.1.3"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p2 addresses], [0],
+    [[["0a:00:00:00:00:03 192.168.1.4"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p3 addresses], [0],
+    [[["0a:00:00:00:00:04 192.168.1.5"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p4 addresses], [0],
+    [[["0a:00:00:00:00:05 192.168.1.6"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p5 addresses], [0],
+    [[["0a:00:00:00:00:06 192.168.1.7"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p6 addresses], [0],
+    [[["0a:00:00:00:00:07 192.168.1.8"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p7 addresses], [0],
+    [[["0a:00:00:00:00:08 192.168.1.9"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p8 addresses], [0],
+    [[["0a:00:00:00:00:09 192.168.1.10"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p9 addresses], [0],
+    [[["0a:00:00:00:00:0a 192.168.1.11"]]
+])
+
+# Trying similar tests with a second switch. MAC addresses should be unique
+# across both switches but IP's only need to be unique within the same switch.
+ovn-nbctl ls-add sw1
+ovn-nbctl lsp-add sw1 p10
+ovn-nbctl add Logical-Switch sw1 other_config subnet=192.168.1.0/24
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p10 addresses], [0],
+     [[["0a:00:00:00:00:0b 192.168.1.2"]]
+])
+
+for n in `seq 11 19`; do
+    ovn-nbctl lsp-add sw1 "p$n"
+done
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p11 addresses], [0],
+     [[["0a:00:00:00:00:0c 192.168.1.3"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p12 addresses], [0],
+     [[["0a:00:00:00:00:0d 192.168.1.4"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p13 addresses], [0],
+     [[["0a:00:00:00:00:0e 192.168.1.5"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p14 addresses], [0],
+     [[["0a:00:00:00:00:0f 192.168.1.6"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p15 addresses], [0],
+     [[["0a:00:00:00:00:10 192.168.1.7"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p16 addresses], [0],
+     [[["0a:00:00:00:00:11 192.168.1.8"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p17 addresses], [0],
+     [[["0a:00:00:00:00:12 192.168.1.9"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p18 addresses], [0],
+     [[["0a:00:00:00:00:13 192.168.1.10"]]
+])
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p19 addresses], [0],
+     [[["0a:00:00:00:00:14 192.168.1.11"]]
+])
+
+# Change a port's address to test for multiple ip's for a single address entry
+# and addresses set by the user.
+ovn-nbctl lsp-set-addresses p0 "0a:00:00:00:00:15 192.168.1.12 192.168.1.14"
+ovn-nbctl lsp-add sw0 p20
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p20 addresses], [0],
+     [[["0a:00:00:00:00:16 192.168.1.2"]]
+])
+
+# Test for logical router port address management.
+ovn-nbctl create Logical_Router name=R1
+ovn-nbctl -- --id=@lrp create Logical_Router_port name=sw0 \
+network="192.168.1.1/24" mac=\"0a:00:00:00:00:17\" \
+-- add Logical_Router R1 ports @lrp -- lsp-add sw0 rp-sw0 \
+-- set Logical_Switch_Port rp-sw0 type=router options:router-port=sw0
+ovn-nbctl lsp-add sw0 p21
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p21 addresses], [0],
+     [[["0a:00:00:00:00:18 192.168.1.13"]]
+])
+
+# Test for address reuse after logical port is deleted.
+ovn-nbctl lsp-del p0
+ovn-nbctl lsp-add sw0 p23
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p23 addresses], [0],
+     [[["0a:00:00:00:00:19 192.168.1.12"]]
+])
+
+# Test for only MAC address being assigned.
+ovn-nbctl lsp-add sw0 p24 -- lsp-set-addresses p24 "0a:00:00:00:00:19"
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p24 addresses], [0],
+     [[["0a:00:00:00:00:19 192.168.1.14"]]
+])
+ovn-nbctl lsp-add sw0 p25
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p25 addresses], [0],
+     [[["0a:00:00:00:00:1a 192.168.1.15"]]
+])
+
+# Test for multiple addresses to one logical port.
+ovn-nbctl lsp-set-addresses p25 "0a:00:00:00:00:1a 192.168.1.16" \
+"0a:00:00:00:00:1b 192.168.1.17"
+ovn-nbctl lsp-add sw0 p26
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p26 addresses], [0],
+     [[["0a:00:00:00:00:1c 192.168.1.15"]]
+])
+
+# Test for exhausting subnet address space.
+ovn-nbctl ls-add sw2 -- add Logical-Switch sw2 other_config subnet=172.16.1.0/30
+ovn-nbctl lsp-add sw2 p27
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p27 addresses], [0],
+     [[["0a:00:00:00:00:1d 172.16.1.2"]]
+])
+ovn-nbctl lsp-add sw2 p28
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p28 addresses], [0],
+     [[[]]
+])
+
+as ovn-sb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as ovn-nb
+OVS_APP_EXIT_AND_WAIT([ovsdb-server])
+
+as northd
+OVS_APP_EXIT_AND_WAIT([ovn-northd])
+
+AT_CLEANUP
