@@ -60,7 +60,7 @@ static const char *default_nb_db(void);
 static const char *default_sb_db(void);
 
 #define MAC_ADDR_PREFIX 0x0A0000000000ULL
-#define MAC_ADDR_SPACE 0xfffffe
+#define MAC_ADDR_SPACE 0xffffff
 
 /* Stores the suffix of the most recently ipam-allocated MAC address. */
 static uint32_t last_mac;
@@ -645,31 +645,35 @@ ovn_port_allocate_key(struct ovn_datapath *od)
 }
 
 static bool
-ipam_is_duplicate_mac(struct eth_addr *ea, uint64_t mac64)
+ipam_is_duplicate_mac(struct eth_addr *ea, uint64_t mac64, bool warn)
 {
     struct macam_node *macam_node;
     HMAP_FOR_EACH_WITH_HASH (macam_node, hmap_node, hash_uint64(mac64),
                             &macam) {
         if (eth_addr_equals(*ea, macam_node->mac_addr)) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-            VLOG_WARN_RL(&rl, "Duplicate MAC set: "ETH_ADDR_FMT,
-                         ETH_ADDR_ARGS(macam_node->mac_addr));
-            return true;
+            if (warn) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl, "Duplicate MAC set: "ETH_ADDR_FMT,
+                             ETH_ADDR_ARGS(macam_node->mac_addr));
+                return true;
+            }
         }
     }
     return false;
 }
 
 static bool
-ipam_is_duplicate_ip(struct ovn_datapath *od, uint32_t ip)
+ipam_is_duplicate_ip(struct ovn_datapath *od, uint32_t ip, bool warn)
 {
     struct ipam_node *ipam_node;
     HMAP_FOR_EACH_WITH_HASH (ipam_node, hmap_node, hash_int(ip, 0),
                              &od->ipam) {
         if (ipam_node->ip_addr == ip) {
-            static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-            VLOG_WARN_RL(&rl, "Duplicate IP set: "IP_FMT,
-                         IP_ARGS(htonl(ip)));
+            if (warn) {
+                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+                VLOG_WARN_RL(&rl, "Duplicate IP set: "IP_FMT,
+                             IP_ARGS(htonl(ip)));
+            }
             return true;
         }
     }
@@ -684,7 +688,7 @@ ipam_insert_mac(struct eth_addr *ea, bool check)
     }
 
     uint64_t mac64 = eth_addr_to_uint64(*ea);
-    if (check && ipam_is_duplicate_mac(ea, mac64)) {
+    if (check && ipam_is_duplicate_mac(ea, mac64, true)) {
         return;
     }
 
@@ -704,7 +708,7 @@ ipam_insert_ip(struct ovn_datapath *od, uint32_t ip, bool check)
         return;
     }
 
-    if (check && ipam_is_duplicate_ip(od, ip)) {
+    if (check && ipam_is_duplicate_ip(od, ip, true)) {
         return;
     }
 
@@ -766,10 +770,7 @@ ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
         }
         ipam_insert_mac(&lrp_networks.ea, true);
 
-        /* XXX This should be check the logical switch's subnet,
-         * not the logical switch port's. */
-        if (!op->peer || !op->peer->nbs || !od->nbs) {
-//            || !smap_get(&od->nbs->other_config, "subnet")) {
+        if (!op->peer || !op->peer->nbs) {
             return;
         }
 
@@ -784,20 +785,20 @@ static uint64_t
 ipam_get_unused_mac(void)
 {
     uint64_t mac64;
-    uint32_t mac_addr_suffix;
     struct eth_addr mac;
-    for (uint32_t i = 0; i < MAC_ADDR_SPACE; i++) {
+    uint32_t mac_addr_suffix, i;
+    for (i = 0; i < MAC_ADDR_SPACE - 1; i++) {
         /* The tentative MAC's suffix will be in the interval [1, 0xffffff). */
-        mac_addr_suffix = ((last_mac + i) % MAC_ADDR_SPACE) + 1;
+        mac_addr_suffix = ((last_mac + i) % (MAC_ADDR_SPACE - 1)) + 1;
         mac64 = MAC_ADDR_PREFIX | mac_addr_suffix;
         eth_addr_from_uint64(mac64, &mac);
-        if (!ipam_is_duplicate_mac(&mac, mac64)) {
+        if (!ipam_is_duplicate_mac(&mac, mac64, false)) {
             last_mac = mac_addr_suffix;
             break;
         }
     }
 
-    if (mac64 == MAC_ADDR_SPACE) {
+    if (i == MAC_ADDR_SPACE) {
         static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 1);
         VLOG_WARN_RL(&rl, "MAC address space exhausted.");
         mac64 = 0;
@@ -815,11 +816,11 @@ ipam_get_unused_ip(struct ovn_datapath *od, uint32_t subnet, uint32_t mask)
 
     uint32_t ip = 0;
 
-    /* Find first unused IP address in subnet. x.x.x.1 is reserved for
-     * a logical router port. */
+    /* Find an unused IP address in subnet. x.x.x.1 is reserved for a
+     * logical router port. */
     for (uint32_t i = 2; i < ~mask; i++) {
         uint32_t tentative_ip = subnet + i;
-        if (!ipam_is_duplicate_ip(od, tentative_ip)) {
+        if (!ipam_is_duplicate_ip(od, tentative_ip, false)) {
             ip = tentative_ip;
             break;
         }

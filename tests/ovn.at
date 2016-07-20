@@ -3808,7 +3808,7 @@ AT_CHECK([ovn-nbctl get Logical-Switch-Port p19 dynamic_addresses], [0],
 ovn-nbctl lsp-set-addresses p0 "0a:00:00:00:00:15 192.168.1.12 192.168.1.14"
 ovn-nbctl lsp-add sw0 p20 -- lsp-set-addresses p20 dynamic
 AT_CHECK([ovn-nbctl get Logical-Switch-Port p20 dynamic_addresses], [0],
-     [[["0a:00:00:00:00:16 192.168.1.13"]]
+     [[["0a:00:00:00:00:16 192.168.1.2"]]
 ])
 
 # Test for logical router port address management.
@@ -3819,39 +3819,29 @@ network="192.168.1.1/24" mac=\"0a:00:00:00:00:17\" \
 -- set Logical_Switch_Port rp-sw0 type=router options:router-port=sw0
 ovn-nbctl lsp-add sw0 p21 -- lsp-set-addresses p21 dynamic
 AT_CHECK([ovn-nbctl get Logical-Switch-Port p21 dynamic_addresses], [0],
-     [[["0a:00:00:00:00:18 192.168.1.15"]]
+     [[["0a:00:00:00:00:18 192.168.1.13"]]
 ])
 
 # Test for address reuse after logical port is deleted.
 ovn-nbctl lsp-del p0
 ovn-nbctl lsp-add sw0 p23 -- lsp-set-addresses p23 dynamic
 AT_CHECK([ovn-nbctl get Logical-Switch-Port p23 dynamic_addresses], [0],
-     [[["0a:00:00:00:00:19 192.168.1.2"]]
+     [[["0a:00:00:00:00:19 192.168.1.12"]]
 ])
 
-# Test for only MAC address being assigned.
-# ovn-nbctl lsp-add sw0 p24 -- lsp-set-addresses p24 "0a:00:00:00:00:19"
-# AT_CHECK([ovn-nbctl get Logical-Switch-Port p24 dynamic_addresses], [0],
-#      [[["0a:00:00:00:00:19 192.168.1.12"]]
-# ])
-# ovn-nbctl lsp-add sw0 p25
-# AT_CHECK([ovn-nbctl get Logical-Switch-Port p25 dynamic_addresses], [0],
-#      [[["0a:00:00:00:00:1a 192.168.1.14"]]
-# ])
-
 # Test for multiple addresses to one logical port.
-ovn-nbctl lsp-set-addresses p25 "0a:00:00:00:00:1a 192.168.1.16" \
-"0a:00:00:00:00:1b 192.168.1.17"
+ovn-nbctl lsp-add sw0 p25 -- lsp-set-addresses p25 \
+"0a:00:00:00:00:1a 192.168.1.14" "0a:00:00:00:00:1b 192.168.1.15"
 ovn-nbctl lsp-add sw0 p26 -- lsp-set-addresses p26 dynamic
 AT_CHECK([ovn-nbctl get Logical-Switch-Port p26 dynamic_addresses], [0],
-     [[["0a:00:00:00:00:1a 192.168.1.12"]]
+     [[["0a:00:00:00:00:1c 192.168.1.16"]]
 ])
 
 # Test for exhausting subnet address space.
 ovn-nbctl ls-add sw2 -- add Logical-Switch sw2 other_config subnet=172.16.1.0/30
 ovn-nbctl lsp-add sw2 p27 -- lsp-set-addresses p27 dynamic
 AT_CHECK([ovn-nbctl get Logical-Switch-Port p27 dynamic_addresses], [0],
-     [[["0a:00:00:00:00:1b 172.16.1.2"]]
+     [[["0a:00:00:00:00:1d 172.16.1.2"]]
 ])
 ovn-nbctl lsp-add sw2 p28 -- lsp-set-addresses p28 dynamic
 AT_CHECK([ovn-nbctl get Logical-Switch-Port p28 dynamic_addresses], [0],
