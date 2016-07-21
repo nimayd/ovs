@@ -827,43 +827,22 @@ ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
         return;
     }
 
-    /* Allocate MAC address. */
     struct eth_addr mac;
-    if (!op->nbs->n_addresses) {
-        uint64_t mac64 = ipam_get_unused_mac();
-        eth_addr_from_uint64(mac64, &mac);
-    } else {
-        /* If op already has at least one IPv4 address, do not allocate any
-         * addresses for it. Otherwise, use one of op's MAC addresses that
-         * does not have an IPv4 address associated with it to construct a new
-         * address. */
-        struct lport_addresses laddrs;
-        for (size_t i = 0; i < op->nbs->n_addresses; i++) {
-            if (!extract_lsp_addresses(op->nbs->addresses[i], &laddrs)) {
-                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-                VLOG_INFO_RL(&rl, "invalid syntax '%s' in addresses. No MAC"
-                          " address found", op->nbs->addresses[i]);
-                return;
-            } else if (laddrs.n_ipv4_addrs > 0) {
-                return;
-            } else {
-                mac = laddrs.ea;
-            }
-        }
+    uint64_t mac64 = ipam_get_unused_mac();
+    if (!mac64) {
+        return;
     }
+    eth_addr_from_uint64(mac64, &mac);
 
-    /* Allocate ip and add it to IPAM hmap. */
     uint32_t ip = ipam_get_unused_ip(od, ntohl(subnet), ntohl(mask));
     if (!ip) {
         return;
     }
-    ipam_insert_ip(od, ip, false);
 
-    /* Add MAC to MACAM hmap if it is newly allocated and an IPv4 address was
-     * successfully allocated. */
-    if (!op->nbs->n_addresses) {
-        ipam_insert_mac(&mac, false);
-    }
+    /* Add MAC/IP to MACAM/IPAM hmaps if both addresses were allocated
+     * successfully. */
+    ipam_insert_mac(&mac, false);
+    ipam_insert_ip(od, ip, false);
 
     /* Convert MAC to string form. */
     struct ds mac_ds;
@@ -876,8 +855,9 @@ ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
     ds_put_format(&ip_ds, IP_FMT, IP_ARGS(htonl(ip)));
 
     char *new_addr = xasprintf("%s %s", mac_ds.string, ip_ds.string);
-    nbrec_logical_switch_port_set_addresses(op->nbs, (const char **) &new_addr,
-                                            1);
+    nbrec_logical_switch_port_set_dynamic_addresses(op->nbs,
+                                                    (const char **) &new_addr,
+                                                    1);
     ds_destroy(&mac_ds);
     ds_destroy(&ip_ds);
 }
@@ -891,7 +871,7 @@ build_ipam(struct northd_context *ctx, struct hmap *datapaths,
     }
 
     /* If the switch's other_config:subnet is set, allocate new addresses for
-     * ports that do not have any. */
+     * ports that have the "dynamic" keyword in their addresses column. */
     struct ovn_datapath *od;
     HMAP_FOR_EACH (od, key_node, datapaths) {
         if (od->nbs) {
@@ -922,9 +902,16 @@ build_ipam(struct northd_context *ctx, struct hmap *datapaths,
 
                 op = ovn_port_find(ports, nbs->name);
                 if (op && !(op->nbs && op->peer)) {
-                    /* Allocate addresses for logical switch ports that do not
+                    /* Do not allocate addresses for logical switch ports that
                      * have a peer. */
-                    ipam_allocate_addresses(od, op, subnet, mask);
+                    continue;
+                }
+
+                for (size_t j = 0; j < nbs->n_addresses; j++) {
+                    if (!strcmp(nbs->addresses[j], "dynamic")) {
+                        ipam_allocate_addresses(od, op, subnet, mask);
+                        break;
+                    }
                 }
             }
         }
@@ -980,7 +967,8 @@ join_logical_ports(struct northd_context *ctx,
                 op->lsp_addrs
                     = xmalloc(sizeof *op->lsp_addrs * nbsp->n_addresses);
                 for (size_t j = 0; j < nbsp->n_addresses; j++) {
-                    if (!strcmp(nbsp->addresses[j], "unknown")) {
+                    if (!strcmp(nbsp->addresses[j], "unknown")
+                        || !strcmp(nbsp->addresses[j], "dynamic")) {
                         continue;
                     }
                     if (!extract_lsp_addresses(nbsp->addresses[j],
