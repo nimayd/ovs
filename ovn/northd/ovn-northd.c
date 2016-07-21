@@ -714,6 +714,34 @@ ipam_insert_ip(struct ovn_datapath *od, uint32_t ip, bool check)
 }
 
 static void
+ipam_insert_lsp_addresses(struct ovn_datapath *od, struct ovn_port *op,
+                          char *address) {
+    if (!od || !op || !address || !strcmp(address, "unknown")
+        || !strcmp(address, "dynamic")) {
+        return;
+    }
+
+    struct lport_addresses laddrs;
+    if (!extract_lsp_addresses(address, &laddrs)) {
+        static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
+        VLOG_WARN_RL(&rl, "Extract addresses failed.");
+        return;
+    }
+    ipam_insert_mac(&laddrs.ea, true);
+
+    /* IP is only added to IPAM if the switch's subnet option
+     * is set, whereas MAC is always added to MACAM. */
+    if (!smap_get(&od->nbs->other_config, "subnet")) {
+        return;
+    }
+
+    for (size_t j = 0; j < laddrs.n_ipv4_addrs; j++) {
+        uint32_t ip = ntohl(laddrs.ipv4_addrs[j].addr);
+        ipam_insert_ip(od, ip, true);
+    }
+}
+
+static void
 ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
 {
     if (!od || !op) {
@@ -723,24 +751,10 @@ ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
     if (op->nbs) {
         /* Add all the port's addresses to address data structures. */
         for (size_t i = 0; i < op->nbs->n_addresses; i++) {
-            struct lport_addresses laddrs;
-            if (!extract_lsp_addresses(op->nbs->addresses[i], &laddrs)) {
-                static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
-                VLOG_WARN_RL(&rl, "Extract addresses failed.");
-                continue;
-            }
-            ipam_insert_mac(&laddrs.ea, true);
-
-            /* IP is only added to IPAM if the switch's subnet option
-             * is set, whereas MAC is always added to MACAM. */
-            if (!smap_get(&od->nbs->other_config, "subnet")) {
-                continue;
-            }
-
-            for (size_t j = 0; j < laddrs.n_ipv4_addrs; j++) {
-                uint32_t ip = ntohl(laddrs.ipv4_addrs[j].addr);
-                ipam_insert_ip(od, ip, true);
-            }
+            ipam_insert_lsp_addresses(od, op, op->nbs->addresses[i]);
+        }
+        for (size_t i = 0; i < op->nbs->n_dynamic_addresses; i++) {
+            ipam_insert_lsp_addresses(od, op, op->nbs->dynamic_addresses[i]);
         }
     } else if (op->nbr) {
         struct lport_addresses lrp_networks;
@@ -754,13 +768,13 @@ ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
 
         /* XXX This should be check the logical switch's subnet,
          * not the logical switch port's. */
-        if (!op->peer || !op->peer->nbs
-            || !smap_get(&op->peer->nbs->options, "subnet")) {
+        if (!op->peer || !op->peer->nbs || !od->nbs) {
+//            || !smap_get(&od->nbs->other_config, "subnet")) {
             return;
         }
 
-        for (size_t j = 0; j < lrp_networks.n_ipv4_addrs; j++) {
-            uint32_t ip = ntohl(lrp_networks.ipv4_addrs[j].addr);
+        for (size_t i = 0; i < lrp_networks.n_ipv4_addrs; i++) {
+            uint32_t ip = ntohl(lrp_networks.ipv4_addrs[i].addr);
             ipam_insert_ip(od, ip, true);
         }
     }
@@ -901,14 +915,15 @@ build_ipam(struct northd_context *ctx, struct hmap *datapaths,
                 }
 
                 op = ovn_port_find(ports, nbs->name);
-                if (op && !(op->nbs && op->peer)) {
+                if (!op || (op->nbs && op->peer)) {
                     /* Do not allocate addresses for logical switch ports that
                      * have a peer. */
                     continue;
                 }
 
                 for (size_t j = 0; j < nbs->n_addresses; j++) {
-                    if (!strcmp(nbs->addresses[j], "dynamic")) {
+                    if (!strcmp(nbs->addresses[j], "dynamic")
+                        && !nbs->n_dynamic_addresses) {
                         ipam_allocate_addresses(od, op, subnet, mask);
                         break;
                     }
@@ -2583,6 +2598,8 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                     ovn_multicast_add(mcgroups, &mc_unknown, op);
                     op->od->has_unknown = true;
                 }
+            } else if (!strcmp(op->nbs->addresses[i], "dynamic")) {
+                continue;
             } else {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
 
