@@ -62,9 +62,6 @@ static const char *default_sb_db(void);
 #define MAC_ADDR_PREFIX 0x0A0000000000ULL
 #define MAC_ADDR_SPACE 0xffffff
 
-/* Stores the suffix of the most recently ipam-allocated MAC address. */
-static uint32_t last_mac;
-
 /* MAC address table of "struct eth_addr"s, that holds the MAC addresses
  * allocated by the ipam. */
 static struct hmap macam = HMAP_INITIALIZER(&macam);
@@ -719,7 +716,8 @@ ipam_insert_ip(struct ovn_datapath *od, uint32_t ip, bool check)
 
 static void
 ipam_insert_lsp_addresses(struct ovn_datapath *od, struct ovn_port *op,
-                          char *address) {
+                          char *address)
+{
     if (!od || !op || !address || !strcmp(address, "unknown")
         || !strcmp(address, "dynamic")) {
         return;
@@ -785,6 +783,10 @@ ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
 static uint64_t
 ipam_get_unused_mac(void)
 {
+
+    /* Stores the suffix of the most recently ipam-allocated MAC address. */
+    static uint32_t last_mac;
+
     uint64_t mac64;
     struct eth_addr mac;
     uint32_t mac_addr_suffix, i;
