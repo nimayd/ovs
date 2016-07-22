@@ -454,10 +454,9 @@
         <p>
           Addresses assigned to the logical port by the IPAM.  Addresses will
           be of the same format as those that populate the
-          <ref column="addresses"/> column.  Since these addresses are
-          constructed and managed locally in ovn-northd, they cannot be
-          reconstructed in the event that the database is lost.  Thus, the
-          dynamic MAC/IP bindings will be lost in this case.
+          <ref column="addresses"/> column.  Note that these addresses are
+          constructed and managed locally in ovn-northd, so they cannot be
+          reconstructed in the event that the database is lost.
         </p>
       </column>
 
