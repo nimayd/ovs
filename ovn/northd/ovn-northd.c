@@ -655,8 +655,8 @@ ipam_is_duplicate_mac(struct eth_addr *ea, uint64_t mac64, bool warn)
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
                 VLOG_WARN_RL(&rl, "Duplicate MAC set: "ETH_ADDR_FMT,
                              ETH_ADDR_ARGS(macam_node->mac_addr));
-                return true;
             }
+            return true;
         }
     }
     return false;
@@ -752,17 +752,17 @@ ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
         return;
     }
 
-    if (op->nbs) {
+    if (op->nbsp) {
         /* Add all the port's addresses to address data structures. */
-        for (size_t i = 0; i < op->nbs->n_addresses; i++) {
-            ipam_insert_lsp_addresses(od, op, op->nbs->addresses[i]);
+        for (size_t i = 0; i < op->nbsp->n_addresses; i++) {
+            ipam_insert_lsp_addresses(od, op, op->nbsp->addresses[i]);
         }
-        for (size_t i = 0; i < op->nbs->n_dynamic_addresses; i++) {
-            ipam_insert_lsp_addresses(od, op, op->nbs->dynamic_addresses[i]);
+        for (size_t i = 0; i < op->nbsp->n_dynamic_addresses; i++) {
+            ipam_insert_lsp_addresses(od, op, op->nbsp->dynamic_addresses[i]);
         }
-    } else if (op->nbr) {
+    } else if (op->nbrp) {
         struct lport_addresses lrp_networks;
-        if (!extract_lrp_networks(op->nbr, &lrp_networks)) {
+        if (!extract_lrp_networks(op->nbrp, &lrp_networks)) {
             static struct vlog_rate_limit rl
                 = VLOG_RATE_LIMIT_INIT(1, 1);
             VLOG_WARN_RL(&rl, "Extract addresses failed.");
@@ -770,7 +770,8 @@ ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
         }
         ipam_insert_mac(&lrp_networks.ea, true);
 
-        if (!op->peer || !op->peer->nbs) {
+        if (!op->peer || !op->peer->nbsp || !op->peer->od || !op->peer->od->nbs
+            || !smap_get(&op->peer->od->nbs->other_config, "subnet")) {
             return;
         }
 
@@ -838,7 +839,7 @@ static void
 ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
                    ovs_be32 subnet, ovs_be32 mask)
 {
-    if (!od || !op || !op->nbs) {
+    if (!od || !op || !op->nbsp) {
         return;
     }
 
@@ -870,7 +871,7 @@ ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
     ds_put_format(&ip_ds, IP_FMT, IP_ARGS(htonl(ip)));
 
     char *new_addr = xasprintf("%s %s", mac_ds.string, ip_ds.string);
-    nbrec_logical_switch_port_set_dynamic_addresses(op->nbs,
+    nbrec_logical_switch_port_set_dynamic_addresses(op->nbsp,
                                                     (const char **) &new_addr,
                                                     1);
     ds_destroy(&mac_ds);
@@ -908,23 +909,23 @@ build_ipam(struct northd_context *ctx, struct hmap *datapaths,
 
             struct ovn_port *op;
             for (size_t i = 0; i < od->nbs->n_ports; i++) {
-                const struct nbrec_logical_switch_port *nbs =
+                const struct nbrec_logical_switch_port *nbsp =
                     od->nbs->ports[i];
 
-                if (!nbs) {
+                if (!nbsp) {
                     continue;
                 }
 
-                op = ovn_port_find(ports, nbs->name);
-                if (!op || (op->nbs && op->peer)) {
+                op = ovn_port_find(ports, nbsp->name);
+                if (!op || (op->nbsp && op->peer)) {
                     /* Do not allocate addresses for logical switch ports that
                      * have a peer. */
                     continue;
                 }
 
-                for (size_t j = 0; j < nbs->n_addresses; j++) {
-                    if (!strcmp(nbs->addresses[j], "dynamic")
-                        && !nbs->n_dynamic_addresses) {
+                for (size_t j = 0; j < nbsp->n_addresses; j++) {
+                    if (!strcmp(nbsp->addresses[j], "dynamic")
+                        && !nbsp->n_dynamic_addresses) {
                         ipam_allocate_addresses(od, op, subnet, mask);
                         break;
                     }
@@ -2599,7 +2600,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                     ovn_multicast_add(mcgroups, &mc_unknown, op);
                     op->od->has_unknown = true;
                 }
-            } else if (!strcmp(op->nbs->addresses[i], "dynamic")) {
+            } else if (!strcmp(op->nbsp->addresses[i], "dynamic")) {
                 continue;
             } else {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);

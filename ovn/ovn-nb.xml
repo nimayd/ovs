@@ -125,9 +125,11 @@
       </p>
 
       <column name="other_config" key="subnet">
-        If set, logical ports that are attached to this switch that do not have
-        a MAC/IPv4 address will automatically be allocated a globally unique
-        MAC address/unused IPv4 address within the provided subnet.
+        If set, logical ports that are attached to this switch that have the
+        "dynamic" keyword in their addresses column will automatically be
+        allocated a globally unique MAC address/unused IPv4 address within the
+        provided subnet.  The allocated address will populate the
+        <ref column="dynamic_addresses"/> column.
       </column>
     </group>
 
@@ -450,7 +452,12 @@
 
       <column name="dynamic_addresses">
         <p>
-          Addresses assigned to the logical port by the IPAM.
+          Addresses assigned to the logical port by the IPAM.  Addresses will
+          be of the same format as those that populate the
+          <ref column="addresses"/> column.  Since these addresses are
+          constructed and managed locally in ovn-northd, they cannot be
+          reconstructed in the event that the database is lost.  Thus, the
+          dynamic MAC/IP bindings will be lost in this case.
         </p>
       </column>
 
