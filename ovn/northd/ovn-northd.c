@@ -983,14 +983,31 @@ join_logical_ports(struct northd_context *ctx,
                     ovs_list_push_back(nb_only, &op->list);
                 }
 
-                op->lsp_addrs
-                    = xmalloc(sizeof *op->lsp_addrs * nbsp->n_addresses);
+                op->lsp_addrs = xmalloc(sizeof *op->lsp_addrs
+                          * (nbsp->n_addresses + nbsp->n_dynamic_addresses));
                 for (size_t j = 0; j < nbsp->n_addresses; j++) {
                     if (!strcmp(nbsp->addresses[j], "unknown")
-                        || !strcmp(nbsp->addresses[j], "dynamic")) {
+                        || (!strcmp(nbsp->addresses[j], "dynamic")
+                            && !nbsp->n_dynamic_addresses)) {
                         continue;
                     }
-                    if (!extract_lsp_addresses(nbsp->addresses[j],
+                    if (!strcmp(nbsp->addresses[j], "dynamic")) {
+                        for (size_t k = 0; k < nbsp->n_dynamic_addresses; k++) {
+                            if (!extract_lsp_addresses(
+                                            nbsp->dynamic_addresses[k],
+                                            &op->lsp_addrs[op->n_lsp_addrs])) {
+                                static struct vlog_rate_limit rl
+                                    = VLOG_RATE_LIMIT_INIT(1, 1);
+                                VLOG_INFO_RL(&rl,
+                                             "invalid syntax '%s' in logical "
+                                             "switch port dynamic_addresses. "
+                                             "No MAC address found",
+                                             op->nbsp->dynamic_addresses[k]);
+                                continue;
+                            }
+                        }
+                    }
+                    else if (!extract_lsp_addresses(nbsp->addresses[j],
                                            &op->lsp_addrs[op->n_lsp_addrs])) {
                         static struct vlog_rate_limit rl
                             = VLOG_RATE_LIMIT_INIT(1, 1);
@@ -2602,8 +2619,17 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                     ovn_multicast_add(mcgroups, &mc_unknown, op);
                     op->od->has_unknown = true;
                 }
-            } else if (!strcmp(op->nbsp->addresses[i], "dynamic")) {
-                continue;
+            } else if (!strcmp(op->nbsp->addresses[i], "dynamic")
+                       && eth_addr_from_string(op->nbsp->dynamic_addresses[j],
+                                               &mac)) {
+                ds_clear(&match);
+                ds_put_format(&match, "eth.dst == "ETH_ADDR_FMT,
+                              ETH_ADDR_ARGS(mac));
+
+                ds_clear(&actions);
+                ds_put_format(&actions, "outport = %s; output;", op->json_key);
+                ovn_lflow_add(lflows, op->od, S_SWITCH_IN_L2_LKUP, 50,
+                              ds_cstr(&match), ds_cstr(&actions));
             } else {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
 
@@ -3522,8 +3548,8 @@ ovnnb_db_run(struct northd_context *ctx, struct ovsdb_idl_loop *sb_loop)
     struct hmap datapaths, ports;
     build_datapaths(ctx, &datapaths);
     build_ports(ctx, &datapaths, &ports);
-    build_lflows(ctx, &datapaths, &ports);
     build_ipam(ctx, &datapaths, &ports);
+    build_lflows(ctx, &datapaths, &ports);
 
     sync_address_sets(ctx);
 
