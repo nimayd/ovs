@@ -755,8 +755,8 @@ ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
         for (size_t i = 0; i < op->nbsp->n_addresses; i++) {
             ipam_insert_lsp_addresses(od, op, op->nbsp->addresses[i]);
         }
-        for (size_t i = 0; i < op->nbsp->n_dynamic_addresses; i++) {
-            ipam_insert_lsp_addresses(od, op, op->nbsp->dynamic_addresses[i]);
+        if (op->nbsp->dynamic_addresses) {
+            ipam_insert_lsp_addresses(od, op, op->nbsp->dynamic_addresses);
         }
     } else if (op->nbrp) {
         struct lport_addresses lrp_networks;
@@ -873,9 +873,7 @@ ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
     ds_put_format(&ip_ds, IP_FMT, IP_ARGS(htonl(ip)));
 
     char *new_addr = xasprintf("%s %s", mac_ds.string, ip_ds.string);
-    nbrec_logical_switch_port_set_dynamic_addresses(op->nbsp,
-                                                    (const char **) &new_addr,
-                                                    1);
+    nbrec_logical_switch_port_set_dynamic_addresses(op->nbsp, new_addr);
     ds_destroy(&mac_ds);
     ds_destroy(&ip_ds);
 }
@@ -927,8 +925,19 @@ build_ipam(struct northd_context *ctx, struct hmap *datapaths,
 
                 for (size_t j = 0; j < nbsp->n_addresses; j++) {
                     if (!strcmp(nbsp->addresses[j], "dynamic")
-                        && !nbsp->n_dynamic_addresses) {
+                        && !nbsp->dynamic_addresses) {
                         ipam_allocate_addresses(od, op, subnet, mask);
+                        if (!extract_lsp_addresses(nbsp->dynamic_addresses,
+                                           &op->lsp_addrs[op->n_lsp_addrs])) {
+                            static struct vlog_rate_limit rl
+                                = VLOG_RATE_LIMIT_INIT(1, 1);
+                            VLOG_INFO_RL(&rl, "invalid syntax '%s' in logical "
+                                              "switch port dynamic_addresses. "
+                                              "No MAC address found",
+                                              op->nbsp->dynamic_addresses);
+                        } else {
+                            op->n_lsp_addrs++;
+                        }
                         break;
                     }
                 }
@@ -983,32 +992,15 @@ join_logical_ports(struct northd_context *ctx,
                     ovs_list_push_back(nb_only, &op->list);
                 }
 
-                op->lsp_addrs = xmalloc(sizeof *op->lsp_addrs
-                          * (nbsp->n_addresses + nbsp->n_dynamic_addresses));
+                op->lsp_addrs
+                    = xmalloc(sizeof *op->lsp_addrs * nbsp->n_addresses);
                 for (size_t j = 0; j < nbsp->n_addresses; j++) {
                     if (!strcmp(nbsp->addresses[j], "unknown")
-                        || (!strcmp(nbsp->addresses[j], "dynamic")
-                            && !nbsp->n_dynamic_addresses)) {
+                        || !strcmp(nbsp->addresses[j], "dynamic")) {
                         continue;
                     }
-                    if (!strcmp(nbsp->addresses[j], "dynamic")) {
-                        for (size_t k = 0; k < nbsp->n_dynamic_addresses; k++) {
-                            if (!extract_lsp_addresses(
-                                            nbsp->dynamic_addresses[k],
+                    if (!extract_lsp_addresses(nbsp->addresses[j],
                                             &op->lsp_addrs[op->n_lsp_addrs])) {
-                                static struct vlog_rate_limit rl
-                                    = VLOG_RATE_LIMIT_INIT(1, 1);
-                                VLOG_INFO_RL(&rl,
-                                             "invalid syntax '%s' in logical "
-                                             "switch port dynamic_addresses. "
-                                             "No MAC address found",
-                                             op->nbsp->dynamic_addresses[k]);
-                                continue;
-                            }
-                        }
-                    }
-                    else if (!extract_lsp_addresses(nbsp->addresses[j],
-                                           &op->lsp_addrs[op->n_lsp_addrs])) {
                         static struct vlog_rate_limit rl
                             = VLOG_RATE_LIMIT_INIT(1, 1);
                         VLOG_INFO_RL(&rl, "invalid syntax '%s' in logical "
@@ -2619,9 +2611,12 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                     ovn_multicast_add(mcgroups, &mc_unknown, op);
                     op->od->has_unknown = true;
                 }
-            } else if (!strcmp(op->nbsp->addresses[i], "dynamic")
-                       && eth_addr_from_string(op->nbsp->dynamic_addresses[j],
-                                               &mac)) {
+            } else if (!strcmp(op->nbsp->addresses[i], "dynamic")) {
+                if(!op->nbsp->dynamic_addresses
+                   || !eth_addr_from_string(op->nbsp->dynamic_addresses,
+                                            &mac)) {
+                    continue;
+                }
                 ds_clear(&match);
                 ds_put_format(&match, "eth.dst == "ETH_ADDR_FMT,
                               ETH_ADDR_ARGS(mac));

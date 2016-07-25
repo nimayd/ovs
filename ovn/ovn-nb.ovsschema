@@ -58,7 +58,7 @@
                                        "max": "unlimited"}},
                 "dynamic_addresses": {"type": {"key": "string",
                                        "min": 0,
-                                       "max": "unlimited"}},
+                                       "max": 1}},
                 "port_security": {"type": {"key": "string",
                                            "min": 0,
                                            "max": "unlimited"}},
