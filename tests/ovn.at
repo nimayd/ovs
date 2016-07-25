@@ -3848,6 +3848,8 @@ AT_CHECK([ovn-nbctl get Logical-Switch-Port p28 dynamic_addresses], [0],
      [[[]]
 ])
 
+# Test for a ping using dynamically allocated addresses.
+
 as ovn-sb
 OVS_APP_EXIT_AND_WAIT([ovsdb-server])
 
