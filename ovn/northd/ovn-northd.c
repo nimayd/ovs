@@ -837,24 +837,24 @@ ipam_get_unused_ip(struct ovn_datapath *od, uint32_t subnet, uint32_t mask)
     return ip;
 }
 
-static void
+static bool
 ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
                    ovs_be32 subnet, ovs_be32 mask)
 {
     if (!od || !op || !op->nbsp) {
-        return;
+        return false;
     }
 
     struct eth_addr mac;
     uint64_t mac64 = ipam_get_unused_mac();
     if (!mac64) {
-        return;
+        return false;
     }
     eth_addr_from_uint64(mac64, &mac);
 
     uint32_t ip = ipam_get_unused_ip(od, ntohl(subnet), ntohl(mask));
     if (!ip) {
-        return;
+        return false;
     }
 
     /* Add MAC/IP to MACAM/IPAM hmaps if both addresses were allocated
@@ -873,9 +873,12 @@ ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
     ds_put_format(&ip_ds, IP_FMT, IP_ARGS(htonl(ip)));
 
     char *new_addr = xasprintf("%s %s", mac_ds.string, ip_ds.string);
-    nbrec_logical_switch_port_set_dynamic_addresses(op->nbsp, new_addr);
+    nbrec_logical_switch_port_set_dynamic_addresses(op->nbsp,
+                                                    (const char*) new_addr);
     ds_destroy(&mac_ds);
     ds_destroy(&ip_ds);
+
+    return true;
 }
 
 static void
@@ -926,15 +929,12 @@ build_ipam(struct northd_context *ctx, struct hmap *datapaths,
                 for (size_t j = 0; j < nbsp->n_addresses; j++) {
                     if (!strcmp(nbsp->addresses[j], "dynamic")
                         && !nbsp->dynamic_addresses) {
-                        ipam_allocate_addresses(od, op, subnet, mask);
-                        if (!extract_lsp_addresses(nbsp->dynamic_addresses,
-                                           &op->lsp_addrs[op->n_lsp_addrs])) {
+                        if (!ipam_allocate_addresses(od, op, subnet, mask)
+                            || !extract_lsp_addresses(nbsp->dynamic_addresses,
+                                            &op->lsp_addrs[op->n_lsp_addrs])) {
                             static struct vlog_rate_limit rl
                                 = VLOG_RATE_LIMIT_INIT(1, 1);
-                            VLOG_INFO_RL(&rl, "invalid syntax '%s' in logical "
-                                              "switch port dynamic_addresses. "
-                                              "No MAC address found",
-                                              op->nbsp->dynamic_addresses);
+                            VLOG_INFO_RL(&rl, "Failed to allocate address.");
                         } else {
                             op->n_lsp_addrs++;
                         }
