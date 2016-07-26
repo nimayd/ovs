@@ -646,7 +646,7 @@ ipam_is_duplicate_mac(struct eth_addr *ea, uint64_t mac64, bool warn)
 {
     struct macam_node *macam_node;
     HMAP_FOR_EACH_WITH_HASH (macam_node, hmap_node, hash_uint64(mac64),
-                            &macam) {
+                             &macam) {
         if (eth_addr_equals(*ea, macam_node->mac_addr)) {
             if (warn) {
                 static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(1, 1);
@@ -685,17 +685,17 @@ ipam_insert_mac(struct eth_addr *ea, bool check)
     }
 
     uint64_t mac64 = eth_addr_to_uint64(*ea);
-    if (check && ipam_is_duplicate_mac(ea, mac64, true)) {
+    /* If the new MAC was not assigned by this address management system or
+     * check is true and the new MAC is a duplicate, do not insert it into the
+     * macam hmap. */
+    if (((mac64 ^ MAC_ADDR_PREFIX) >> 24)
+        || (check && ipam_is_duplicate_mac(ea, mac64, true))) {
         return;
     }
 
-    /* Insert new MAC into MACAM if it is not a duplicate and was
-     * assigned by this address management system. */
-    if (!((mac64 ^ MAC_ADDR_PREFIX) >> 24)) {
-        struct macam_node *new_macam_node = xmalloc(sizeof *new_macam_node);
-        new_macam_node->mac_addr = *ea;
-        hmap_insert(&macam, &new_macam_node->hmap_node, hash_uint64(mac64));
-    }
+    struct macam_node *new_macam_node = xmalloc(sizeof *new_macam_node);
+    new_macam_node->mac_addr = *ea;
+    hmap_insert(&macam, &new_macam_node->hmap_node, hash_uint64(mac64));
 }
 
 static void
@@ -734,6 +734,7 @@ ipam_insert_lsp_addresses(struct ovn_datapath *od, struct ovn_port *op,
     /* IP is only added to IPAM if the switch's subnet option
      * is set, whereas MAC is always added to MACAM. */
     if (!smap_get(&od->nbs->other_config, "subnet")) {
+        destroy_lport_addresses(&laddrs);
         return;
     }
 
@@ -741,6 +742,8 @@ ipam_insert_lsp_addresses(struct ovn_datapath *od, struct ovn_port *op,
         uint32_t ip = ntohl(laddrs.ipv4_addrs[j].addr);
         ipam_insert_ip(od, ip, true);
     }
+
+    destroy_lport_addresses(&laddrs);
 }
 
 static void
@@ -770,20 +773,22 @@ ipam_add_port_addresses(struct ovn_datapath *od, struct ovn_port *op)
 
         if (!op->peer || !op->peer->nbsp || !op->peer->od || !op->peer->od->nbs
             || !smap_get(&op->peer->od->nbs->other_config, "subnet")) {
+            destroy_lport_addresses(&lrp_networks);
             return;
         }
 
         for (size_t i = 0; i < lrp_networks.n_ipv4_addrs; i++) {
             uint32_t ip = ntohl(lrp_networks.ipv4_addrs[i].addr);
-            ipam_insert_ip(od, ip, true);
+            ipam_insert_ip(op->peer->od, ip, true);
         }
+
+        destroy_lport_addresses(&lrp_networks);
     }
 }
 
 static uint64_t
 ipam_get_unused_mac(void)
 {
-
     /* Stores the suffix of the most recently ipam-allocated MAC address. */
     static uint32_t last_mac;
 
@@ -791,7 +796,7 @@ ipam_get_unused_mac(void)
     struct eth_addr mac;
     uint32_t mac_addr_suffix, i;
     for (i = 0; i < MAC_ADDR_SPACE - 1; i++) {
-        /* The tentative MAC's suffix will be in the interval [1, 0xffffff). */
+        /* The tentative MAC's suffix will be in the interval (1, 0xfffffe). */
         mac_addr_suffix = ((last_mac + i) % (MAC_ADDR_SPACE - 1)) + 1;
         mac64 = MAC_ADDR_PREFIX | mac_addr_suffix;
         eth_addr_from_uint64(mac64, &mac);
@@ -839,7 +844,7 @@ ipam_get_unused_ip(struct ovn_datapath *od, uint32_t subnet, uint32_t mask)
 
 static bool
 ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
-                   ovs_be32 subnet, ovs_be32 mask)
+                        ovs_be32 subnet, ovs_be32 mask)
 {
     if (!od || !op || !op->nbsp) {
         return false;
@@ -877,6 +882,7 @@ ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
                                                     (const char*) new_addr);
     ds_destroy(&mac_ds);
     ds_destroy(&ip_ds);
+    free(new_addr);
 
     return true;
 }
@@ -998,16 +1004,20 @@ join_logical_ports(struct northd_context *ctx,
                     if (!strcmp(nbsp->addresses[j], "unknown")) {
                         continue;
                     }
-                    if (!strcmp(nbsp->addresses[j], "dynamic")
-                        && nbsp->dynamic_addresses) {
-                        if (!extract_lsp_addresses(nbsp->dynamic_addresses,
-                                           &op->lsp_addrs[op->n_lsp_addrs])) {
-                            static struct vlog_rate_limit rl
-                                = VLOG_RATE_LIMIT_INIT(1, 1);
-                            VLOG_INFO_RL(&rl, "invalid syntax '%s' in logical "
-                                              "switch port dynamic_addresses. "
-                                              "No MAC address found",
-                                              op->nbsp->dynamic_addresses);
+                    if (!strcmp(nbsp->addresses[j], "dynamic")) {
+                        if (nbsp->dynamic_addresses) {
+                            if (!extract_lsp_addresses(nbsp->dynamic_addresses,
+                                            &op->lsp_addrs[op->n_lsp_addrs])) {
+                                static struct vlog_rate_limit rl
+                                    = VLOG_RATE_LIMIT_INIT(1, 1);
+                                VLOG_INFO_RL(&rl, "invalid syntax '%s' in "
+                                                  "logical switch port "
+                                                  "dynamic_addresses. No "
+                                                  "MAC address found",
+                                                  op->nbsp->dynamic_addresses);
+                                continue;
+                            }
+                        } else {
                             continue;
                         }
                     } else if (!extract_lsp_addresses(nbsp->addresses[j],
@@ -1082,6 +1092,7 @@ join_logical_ports(struct northd_context *ctx,
 
                 op->lrp_networks = lrp_networks;
                 op->od = od;
+                ipam_add_port_addresses(op->od, op);
             }
         }
     }
@@ -1107,7 +1118,6 @@ join_logical_ports(struct northd_context *ctx,
                 op->od->router_ports,
                 sizeof *op->od->router_ports * (op->od->n_router_ports + 1));
             op->od->router_ports[op->od->n_router_ports++] = op;
-            ipam_add_port_addresses(op->od, peer);
         } else if (op->nbrp && op->nbrp->peer) {
             struct ovn_port *peer = ovn_port_find(ports, op->nbrp->peer);
             if (peer) {
@@ -2624,7 +2634,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                 }
             } else if (!strcmp(op->nbsp->addresses[i], "dynamic")) {
                 if (!op->nbsp->dynamic_addresses
-                   || !eth_addr_from_string(op->nbsp->dynamic_addresses,
+                    || !eth_addr_from_string(op->nbsp->dynamic_addresses,
                                             &mac)) {
                     continue;
                 }

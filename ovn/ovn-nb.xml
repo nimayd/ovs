@@ -128,7 +128,7 @@
         If set, logical ports that are attached to this switch that have the
         "dynamic" keyword in their addresses column will automatically be
         allocated a globally unique MAC address/unused IPv4 address within the
-        provided subnet.  The allocated address will populate the
+        provided IPv4 subnet.  The allocated address will populate the
         <ref column="dynamic_addresses"/> column.
       </column>
     </group>
