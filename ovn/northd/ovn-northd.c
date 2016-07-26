@@ -995,12 +995,23 @@ join_logical_ports(struct northd_context *ctx,
                 op->lsp_addrs
                     = xmalloc(sizeof *op->lsp_addrs * nbsp->n_addresses);
                 for (size_t j = 0; j < nbsp->n_addresses; j++) {
-                    if (!strcmp(nbsp->addresses[j], "unknown")
-                        || !strcmp(nbsp->addresses[j], "dynamic")) {
+                    if (!strcmp(nbsp->addresses[j], "unknown")) {
                         continue;
                     }
-                    if (!extract_lsp_addresses(nbsp->addresses[j],
-                                            &op->lsp_addrs[op->n_lsp_addrs])) {
+                    if (!strcmp(nbsp->addresses[j], "dynamic")
+                        && nbsp->dynamic_addresses) {
+                        if (!extract_lsp_addresses(nbsp->dynamic_addresses,
+                                           &op->lsp_addrs[op->n_lsp_addrs])) {
+                            static struct vlog_rate_limit rl
+                                = VLOG_RATE_LIMIT_INIT(1, 1);
+                            VLOG_INFO_RL(&rl, "invalid syntax '%s' in logical "
+                                              "switch port dynamic_addresses. "
+                                              "No MAC address found",
+                                              op->nbsp->dynamic_addresses);
+                            continue;
+                        }
+                    } else if (!extract_lsp_addresses(nbsp->addresses[j],
+                                           &op->lsp_addrs[op->n_lsp_addrs])) {
                         static struct vlog_rate_limit rl
                             = VLOG_RATE_LIMIT_INIT(1, 1);
                         VLOG_INFO_RL(&rl, "invalid syntax '%s' in logical "
@@ -2612,7 +2623,7 @@ build_lswitch_flows(struct hmap *datapaths, struct hmap *ports,
                     op->od->has_unknown = true;
                 }
             } else if (!strcmp(op->nbsp->addresses[i], "dynamic")) {
-                if(!op->nbsp->dynamic_addresses
+                if (!op->nbsp->dynamic_addresses
                    || !eth_addr_from_string(op->nbsp->dynamic_addresses,
                                             &mac)) {
                     continue;
