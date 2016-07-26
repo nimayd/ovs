@@ -3849,6 +3849,75 @@ AT_CHECK([ovn-nbctl get Logical-Switch-Port p28 dynamic_addresses], [0],
 ])
 
 # Test for a ping using dynamically allocated addresses.
+ovn-nbctl ls-add foo -- add Logical_Switch sw0 other_config subnet=192.168.2.0/24
+ovn-nbctl ls-add alice -- add Logical_Switch sw0 other_config subnet=192.168.3.0/24
+
+# Connect foo to R1
+ovn-nbctl lrp-add R1 foo 00:00:00:01:02:03 192.168.2.1/24
+ovn-nbctl lsp-add foo rp-foo -- set Logical_Switch_Port rp-foo type=router \
+          options:router-port=foo addresses=\"00:00:00:01:02:03\"
+
+# Connect alice to R1
+ovn-nbctl lrp-add R1 alice 00:00:00:01:02:04 192.168.3.1/24
+ovn-nbctl lsp-add alice rp-alice -- set Logical_Switch_Port rp-alice type=router \
+          options:router-port=foo addresses=\"00:00:00:01:02:04\"
+
+# Create logical port foo1 in foo
+ovn-nbctl lsp-add foo foo1 \
+-- lsp-set-addresses foo1 "dynamic"
+
+# Create logical port alice1 in alice
+ovn-nbctl lsp-add alice alice1 \
+-- lsp-set-addresses alice1 "dynamic"
+
+# Create a hypervisor and create OVS ports corresponding to logical ports.
+net_add n1
+
+sim_add hv1
+as hv1
+ovs-vsctl add-br br-phys
+ovn_attach n1 br-phys 192.168.0.1
+ovs-vsctl -- add-port br-int hv1-vif1 -- \
+    set interface hv1-vif1 external-ids:iface-id=foo1 \
+    options:tx_pcap=hv1/vif1-tx.pcap \
+    options:rxq_pcap=hv1/vif1-rx.pcap \
+    ofport-request=1
+
+ovs-vsctl -- add-port br-int hv1-vif2 -- \
+    set interface hv1-vif2 external-ids:iface-id=alice1 \
+    options:tx_pcap=hv1/vif2-tx.pcap \
+    options:rxq_pcap=hv1/vif2-rx.pcap \
+    ofport-request=2
+
+# Allow some time for ovn-northd and ovn-controller to catch up.
+# XXX This should be more systematic.
+sleep 1
+
+ip_to_hex() {
+    printf "%02x%02x%02x%02x" "$@"
+}
+trim_zeros() {
+    sed 's/\(00\)\{1,\}$//'
+}
+
+# Send ip packets between foo1 and alice1
+src_mac="f00000010203"
+dst_mac="000000010203"
+src_ip=`ip_to_hex 192 168 2 2`
+dst_ip=`ip_to_hex 192 168 3 2`
+packet=${dst_mac}${src_mac}08004500001c0000000040110000${src_ip}${dst_ip}0035111100080000
+as hv1 ovs-appctl netdev-dummy/receive hv1-vif1 $packet
+
+# Packet to Expect at alice1
+src_mac="000000010204"
+dst_mac="f00000010204"
+src_ip=`ip_to_hex 192 168 2 2`
+dst_ip=`ip_to_hex 192 168 3 2`
+expected=${dst_mac}${src_mac}08004500001c000000003e110200${src_ip}${dst_ip}0035111100080000
+
+$PYTHON "$top_srcdir/utilities/ovs-pcap.in" hv1/vif2-tx.pcap | trim_zeros > received1.packets
+echo $expected | trim_zeros > expout
+AT_CHECK([cat received1.packets], [0], [expout])
 
 as ovn-sb
 OVS_APP_EXIT_AND_WAIT([ovsdb-server])
