@@ -3844,7 +3844,12 @@ AT_CHECK([ovn-nbctl get Logical-Switch-Port p27 dynamic_addresses], [0],
      ["0a:00:00:00:00:1d 172.16.1.2"
 ])
 
-# Test for address management not adding duplicate MAC for lsp/lrp peers.
+ovn-nbctl lsp-add sw2 p28 -- lsp-set-addresses p28 dynamic
+AT_CHECK([ovn-nbctl get Logical-Switch-Port p28 dynamic_addresses], [0],
+     [[[]]
+])
+
+# Test that address management does not add duplicate MAC for lsp/lrp peers.
 ovn-nbctl create Logical_Router name=R2
 ovn-nbctl ls-add sw3
 ovn-nbctl lsp-add sw3 p29 -- lsp-set-addresses p29 \
@@ -3856,11 +3861,6 @@ network="192.168.2.1/24" mac=\"0a:00:00:00:00:1f\" \
 ovn-nbctl lsp-add sw0 p30 -- lsp-set-addresses p30 dynamic
 AT_CHECK([ovn-nbctl get Logical-Switch-Port p30 dynamic_addresses], [0],
      ["0a:00:00:00:00:20 192.168.1.17"
-])
-
-ovn-nbctl lsp-add sw2 p28 -- lsp-set-addresses p28 dynamic
-AT_CHECK([ovn-nbctl get Logical-Switch-Port p28 dynamic_addresses], [0],
-     [[[]]
 ])
 
 as ovn-sb

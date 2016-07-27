@@ -850,6 +850,11 @@ ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
         return false;
     }
 
+    uint32_t ip = ipam_get_unused_ip(od, ntohl(subnet), ntohl(mask));
+    if (!ip) {
+        return false;
+    }
+
     struct eth_addr mac;
     uint64_t mac64 = ipam_get_unused_mac();
     if (!mac64) {
@@ -857,31 +862,26 @@ ipam_allocate_addresses(struct ovn_datapath *od, struct ovn_port *op,
     }
     eth_addr_from_uint64(mac64, &mac);
 
-    uint32_t ip = ipam_get_unused_ip(od, ntohl(subnet), ntohl(mask));
-    if (!ip) {
-        return false;
-    }
-
     /* Add MAC/IP to MACAM/IPAM hmaps if both addresses were allocated
      * successfully. */
-    ipam_insert_mac(&mac, false);
     ipam_insert_ip(od, ip, false);
-
-    /* Convert MAC to string form. */
-    struct ds mac_ds;
-    ds_init(&mac_ds);
-    ds_put_format(&mac_ds, ETH_ADDR_FMT, ETH_ADDR_ARGS(mac));
+    ipam_insert_mac(&mac, false);
 
     /* Convert IP to string form. */
     struct ds ip_ds;
     ds_init(&ip_ds);
     ds_put_format(&ip_ds, IP_FMT, IP_ARGS(htonl(ip)));
 
+    /* Convert MAC to string form. */
+    struct ds mac_ds;
+    ds_init(&mac_ds);
+    ds_put_format(&mac_ds, ETH_ADDR_FMT, ETH_ADDR_ARGS(mac));
+
     char *new_addr = xasprintf("%s %s", mac_ds.string, ip_ds.string);
     nbrec_logical_switch_port_set_dynamic_addresses(op->nbsp,
                                                     (const char*) new_addr);
-    ds_destroy(&mac_ds);
     ds_destroy(&ip_ds);
+    ds_destroy(&mac_ds);
     free(new_addr);
 
     return true;
